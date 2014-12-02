@@ -8,6 +8,7 @@ use Time::HiRes qw(time usleep);
 use Mojo::JSON qw(decode_json encode_json);
 
 use common::sense;
+use Data::Dumper;
 
 has 'redis';
 
@@ -17,11 +18,14 @@ sub new {
 
 sub register_worker {
     my $self = shift;
-
-    my $worker = {host => hostname, id => $self->_id, pid => $$, started => time};
     my $redis = $self->redis;
 
+    my $worker = {host => hostname, id => $self->_id, pid => $$, started => time};
+
+    $redis->multi;
     $redis->hmset("minion_workers:$worker->{id}", %$worker);
+    $redis->zadd("minion_workers_created", $worker->{started}, "minion_workers:$worker->{id}");
+    $redis->exec;
 
     return $worker->{id};
 }
@@ -30,18 +34,20 @@ sub list_workers {
     my ($self, $offset, $limit) = @_;
     my $redis = $self->redis;
 
-    my @keys = $redis->keys("minion_workers:*");
-
+    my @keys = $redis->zrevrange("minion_workers_created", $offset, $offset + $limit - 1);
     my @workers = map { {$redis->hgetall($_)} } @keys;
-    @workers = sort { $b->{started} <=> $a->{started} } @workers;
-    @workers = splice(@workers, $offset, $limit);
 
     return \@workers;
 }
 
 sub unregister_worker {
     my ($self, $worker_id) = @_;
-    $self->redis->del("minion_workers:$worker_id");
+    my $redis = $self->redis;
+
+    $redis->multi;
+    $redis->del("minion_workers:$worker_id");
+    $redis->zrem("minion_workers_created", "minion_workers:$worker_id");
+    $redis->exec;
 }
 
 sub worker_info {
@@ -52,6 +58,7 @@ sub worker_info {
 
     my $worker = {$redis->hgetall("minion_workers:$worker_id")};
 
+    # TODO: too slow
     my @jobs_keys = $redis->keys("minion_jobs:*");
     my @jobs = map { $_->{id} } grep { $_->{worker} eq $worker_id } map { {$redis->hgetall($_)} } @jobs_keys;
     $worker->{jobs} = \@jobs;
@@ -107,6 +114,7 @@ sub list_jobs {
 
     my @keys = $redis->keys("minion_jobs:*");
 
+    # TODO: too slow
     my @jobs = sort { $b->{created} <=> $a->{created} } map { {$redis->hgetall($_)} } @keys;
     @jobs = grep { $_->{state} eq $options->{state} } @jobs if $options->{state};
     @jobs = grep { $_->{task} eq $options->{task} } @jobs if $options->{task};
@@ -132,7 +140,7 @@ sub repair {
     my @workers_keys = $redis->keys("minion_workers:*");
     my @workers_dead = grep { $_->{host} eq $host && !kill 0, $_->{pid} } map { {$redis->hgetall($_)} } @workers_keys;
     foreach my $worker (@workers_dead) {
-        $redis->del("minion_workers:$worker->{id}");
+        $self->unregister_worker($worker->{id});
     }
 
     # Abandoned jobs
@@ -174,6 +182,7 @@ sub reset {
 
     $redis->del("minion_hash");
     $redis->del("minion_jobs:inactive");
+    $redis->del('minion_workers_created');
 }
 
 sub retry_job {
@@ -200,11 +209,15 @@ sub retry_job {
 sub remove_job {
     my ($self, $job_id) = @_;
     my $redis = $self->redis;
+    my $key = "minion_jobs:$job_id";
 
-    my $job = {$redis->hgetall("minion_jobs:$job_id")};
-    if ($job->{state} eq 'inactive' || $job->{state} eq 'failed' || $job->{state} eq 'finished') {
-        return $redis->del("minion_jobs:$job_id");
+    my $state = $redis->hget($key, 'state');
+    if ($state eq 'inactive' || $state eq 'failed' || $state eq 'finished') {
+        $redis->del($key);
+        return 1;
     }
+
+    return;
 }
 
 sub stats {
@@ -264,6 +277,7 @@ sub _try {
     #my @ready = map { {$redis->hgetall($_)} } @jobs_keys;
     #$redis->srem("minion_jobs:inactive", $job->{id});
 
+    # TODO: extremly slow
     my @jobs_keys = $redis->keys("minion_jobs:*");
     my @ready = grep { $_->{state} eq 'inactive' } map { {$redis->hgetall($_)} } @jobs_keys;
 
