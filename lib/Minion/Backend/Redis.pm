@@ -112,6 +112,11 @@ sub list_jobs {
     @jobs = grep { $_->{task} eq $options->{task} } @jobs if $options->{task};
     @jobs = splice(@jobs, $offset, $limit);
 
+    foreach my $job (@jobs) {
+        $job->{args} = decode_json($job->{args}) if $job->{args};
+        $job->{result} = decode_json($job->{result}) if $job->{result};
+    }
+
     return \@jobs;
 }
 
