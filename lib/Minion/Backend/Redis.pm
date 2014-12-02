@@ -106,38 +106,17 @@ sub list_jobs {
     my $redis = $self->redis;
 
     my @keys = $redis->keys("minion_jobs:*");
-    @keys = splice(@keys, $offset, $limit);
 
     my @jobs = sort { $b->{created} <=> $a->{created} } map { {$redis->hgetall($_)} } @keys;
     @jobs = grep { $_->{state} eq $options->{state} } @jobs if $options->{state};
     @jobs = grep { $_->{task} eq $options->{task} } @jobs if $options->{task};
+    @jobs = splice(@jobs, $offset, $limit);
 
     return \@jobs;
 }
 
-sub fail_job {
-    my ($self, $job_id, $result) = @_;
-    my $redis = $self->redis;
-
-    my $job = {$redis->hgetall("minion_jobs:$job_id")};
-    if ($job && $job->{state} eq 'active') {
-        @$job{qw(finished result state)} = (time, encode_json($result), 'failed');
-        $redis->hmset("minion_jobs:$job_id", %$job);
-    }
-    return !!$job;
-}
-
-sub finish_job {
-    my ($self, $job_id, $result) = @_;
-    my $redis = $self->redis;
-
-    my $job = {$redis->hgetall("minion_jobs:$job_id")};
-    if ($job && $job->{state} eq 'active') {
-        @$job{qw(finished result state)} = (time, encode_json($result), 'finished');
-        $redis->hmset("minion_jobs:$job_id", %$job);
-    }
-    return !!$job;
-}
+sub fail_job   { shift->_update(1, @_) }
+sub finish_job { shift->_update(0, @_) }
 
 sub repair {
     my $self = shift;
@@ -195,14 +174,22 @@ sub reset {
 sub retry_job {
     my ($self, $job_id) = @_;
     my $redis = $self->redis;
+    my $key = "minion_jobs:$job_id";
 
-    my $job = {$redis->hgetall("minion_jobs:$job_id")};
-    if ($job->{state} eq 'failed' || $job->{state} eq 'finished') {
-        $job->{retries} += 1;
-        @$job{qw(retried state)} = (time, 'inactive');
-        delete $job->{$_} for qw(finished result started worker);
-        return $redis->hmset("minion_jobs:$job_id", %$job);
+    $redis->watch($key);
+    my $state = $redis->hget($key, 'state');
+
+    if ($state eq 'failed' || $state eq 'finished') {
+        $redis->multi;
+        $redis->hincrby($key, 'retries', 1);
+        $redis->hmset($key, 'retried', time, 'state', 'inactive');
+        $redis->hdel($key, 'finished', 'result', 'started', 'worker');
+        $redis->exec;
+        return 1;
     }
+
+    $redis->unwatch;
+    return;
 }
 
 sub remove_job {
@@ -289,6 +276,23 @@ sub _try {
     $job->{args} = decode_json($job->{args}) if $job->{args};
 
     return $job;
+}
+
+sub _update {
+    my ($self, $fail, $job_id, $result) = @_;
+    my $redis = $self->redis;
+    my $key = "minion_jobs:$job_id";
+
+    $redis->watch($key);
+    my $state = $redis->hget($key, 'state');
+
+    if ($state eq 'active') {
+        $redis->hmset($key, 'finished', time, 'result', encode_json($result), 'state', $fail ? 'failed' : 'finished');
+        $redis->unwatch;
+        return 1;
+    }
+
+    return;
 }
 
 1;
