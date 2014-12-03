@@ -38,7 +38,7 @@ is $job->info->{state}, 'active', 'job is still active';
 ok !!$minion->backend->worker_info($id), 'is registered';
 my $pid = 4000;
 $pid++ while kill 0, $pid;
-$minion->backend->redis->hset("minion_workers:$id", 'pid', $pid);
+$minion->backend->redis->hset("minion:workers:$id", 'pid', $pid);
 $minion->repair;
 ok !$minion->backend->worker_info($id), 'not registered';
 is $job->info->{state},  'failed',           'job is no longer active';
@@ -60,10 +60,10 @@ $id = $minion->enqueue('test');
 my $id2 = $minion->enqueue('test');
 my $id3 = $minion->enqueue('test');
 $worker->dequeue(0)->perform for 1 .. 3;
-my $finished = $minion->backend->redis->hget("minion_jobs:$id2", 'finished');
-$minion->backend->redis->hset("minion_jobs:$id2", 'finished', $finished - ($minion->remove_after + 1));
-$finished = $minion->backend->redis->hget("minion_jobs:$id3", 'finished');
-$minion->backend->redis->hset("minion_jobs:$id3", 'finished', $finished - ($minion->remove_after + 1));
+my $finished = $minion->backend->redis->hget("minion:jobs:$id2", 'finished');
+$minion->backend->redis->hset("minion:jobs:$id2", 'finished', $finished - ($minion->remove_after + 1));
+$finished = $minion->backend->redis->hget("minion:jobs:$id3", 'finished');
+$minion->backend->redis->hset("minion:jobs:$id3", 'finished', $finished - ($minion->remove_after + 1));
 $worker->unregister;
 $minion->repair;
 ok $minion->job($id), 'job has not been cleaned up';
@@ -92,9 +92,9 @@ $worker2->unregister;
 
 # Reset
 $minion->reset->repair;
-my @minion_jobs = $minion->backend->redis->keys("minion_jobs:*");
+my @minion_jobs = $minion->backend->redis->keys("minion:jobs:*");
 ok !@minion_jobs, 'no jobs';
-my @minion_workers = $minion->backend->redis->keys("minion_workers:*");
+my @minion_workers = $minion->backend->redis->keys("minion:workers:*");
 ok !@minion_workers, 'no workers';
 
 # Wait for job
@@ -283,7 +283,7 @@ $worker->unregister;
 $id = $minion->enqueue(add => [2, 1] => {delay => 100});
 is $worker->register->dequeue(0), undef, 'too early for job';
 ok $minion->job($id)->info->{delayed} > time, 'delayed timestamp';
-$minion->backend->redis->hset("minion_jobs:$id", 'delayed', time - 100);
+$minion->backend->redis->hset("minion:jobs:$id", 'delayed', time - 100);
 $job = $worker->dequeue(0);
 is $job->id, $id, 'right id';
 like $job->info->{delayed}, qr/^[\d.]+$/, 'has delayed timestamp';
