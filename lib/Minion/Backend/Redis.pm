@@ -133,6 +133,7 @@ sub list_jobs {
 sub fail_job   { shift->_update(1, @_) }
 sub finish_job { shift->_update(0, @_) }
 
+# TODO: too slow, not critical
 sub repair {
     my $self = shift;
     my $redis = $self->redis;
@@ -228,6 +229,7 @@ sub remove_job {
     return;
 }
 
+# TODO: too slow, not critical
 sub stats {
     my $self = shift;
     my $redis = $self->redis;
