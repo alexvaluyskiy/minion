@@ -173,14 +173,10 @@ sub reset {
     my $redis = $self->redis;
 
     my @workers_keys = $redis->keys("minion:workers:*");
-    foreach (@workers_keys) {
-        $redis->del($_);
-    }
+    $redis->del(@workers_keys) if @workers_keys;
 
     my @jobs_keys = $redis->keys("minion:jobs:*");
-    foreach (@jobs_keys) {
-        $redis->del($_);
-    }
+    $redis->del(@jobs_keys) if @jobs_keys;
 
     $redis->del("minion:queue");
     $redis->del('minion:list:workers');
