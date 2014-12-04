@@ -50,6 +50,7 @@ sub unregister_worker {
     $redis->exec;
 }
 
+# TODO: too slow, not critical
 sub worker_info {
     my ($self, $worker_id) = @_;
     my $redis = $self->redis;
@@ -58,7 +59,7 @@ sub worker_info {
 
     my $worker = {$redis->hgetall("minion:workers:$worker_id")};
 
-    my @jobs_keys = $redis->keys("minion:jobs:*"); # TODO: too slow
+    my @jobs_keys = $redis->keys("minion:jobs:*");
     my @jobs = map { $_->{id} } grep { $_->{worker} eq $worker_id } map { {$redis->hgetall($_)} } @jobs_keys;
     $worker->{jobs} = \@jobs;
 
@@ -92,9 +93,9 @@ sub enqueue {
 }
 
 sub dequeue {
-    my ($self, $id, $timeout) = @_;
-    usleep $timeout * 1000000 unless my $job = $self->_try($id);
-    return $job || $self->_try($id);
+    my ($self, $worker_id, $timeout) = @_;
+    usleep $timeout * 1000000 unless my $job = $self->_try($worker_id);
+    return $job || $self->_try($worker_id);
 }
 
 sub job_info {
@@ -109,7 +110,7 @@ sub job_info {
     return $job;
 }
 
-# TODO: too slow
+# TODO: too slow, not critical
 sub list_jobs {
     my ($self, $offset, $limit, $options) = @_;
     my $redis = $self->redis;
@@ -181,7 +182,6 @@ sub reset {
         $redis->del($_);
     }
 
-    $redis->del("minion:ids");
     $redis->del("minion:queue");
     $redis->del('minion:list:workers');
 }
@@ -217,13 +217,18 @@ sub remove_job {
     my $redis = $self->redis;
     my $key = "minion:jobs:$job_id";
 
+    $redis->watch($key);
     my $state = $redis->hget($key, 'state');
+
     if ($state eq 'inactive' || $state eq 'failed' || $state eq 'finished') {
+        $redis->multi;
         $redis->del($key);
         $redis->zrem("minion:queue", $key);
+        $redis->exec;
         return 1;
     }
 
+    $redis->unwatch;
     return;
 }
 
@@ -261,7 +266,6 @@ sub stats {
     return $stats;
 }
 
-# TODO: too slow
 sub _id {
     my $self = shift;
     my $redis = $self->redis;
@@ -270,18 +274,17 @@ sub _id {
     do {
         $id = md5_sum(time . rand 999);
     }
-    while ($redis->sismember('minion:ids', $id));
-
-    $redis->sadd('minion:ids', $id);
+    while ($redis->exists("minion:jobs:$id") && $redis->exists("minion:workers:$id"));
 
     return $id;
 }
 
 sub _try {
-    my ($self, $id) = @_;
+    my ($self, $worker_id) = @_;
     my $redis = $self->redis;
     my $queue_key = 'minion:queue';
 
+    $redis->watch($queue_key);
     my $count = $redis->zcount($queue_key, '-inf', '+inf');
     return undef unless $count;
 
@@ -295,14 +298,17 @@ sub _try {
             next;
         }
         else {
+            $redis->multi;
             $redis->zrem($queue_key, $key);
+            $redis->exec;
             last;
         }
     }
+    $redis->unwatch;
 
     return undef unless $job;
 
-    @$job{qw(started state worker)} = (time, 'active', $id);
+    @$job{qw(started state worker)} = (time, 'active', $worker_id);
     $redis->hmset("minion:jobs:$job->{id}", %$job);
 
     $job->{args} = decode_json($job->{args}) if $job->{args};
@@ -319,9 +325,10 @@ sub _update {
     my $state = $redis->hget($key, 'state');
 
     if ($state eq 'active') {
+        $redis->multi;
         $redis->hmset($key, 'finished', time, 'result', encode_json($result), 'state', $fail ? 'failed' : 'finished');
         $redis->zrem("minion:queue", $key);
-        $redis->unwatch;
+        $redis->exec;
         return 1;
     }
     $redis->unwatch;
