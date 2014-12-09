@@ -7,9 +7,6 @@ use Sys::Hostname 'hostname';
 use Time::HiRes qw(time usleep);
 use Mojo::JSON qw(decode_json encode_json);
 
-use common::sense;
-use Data::Dumper;
-
 has 'redis';
 
 sub new {
@@ -50,18 +47,16 @@ sub unregister_worker {
     $redis->exec;
 }
 
-# TODO: too slow, not critical
 sub worker_info {
     my ($self, $worker_id) = @_;
+    return unless $worker_id;
     my $redis = $self->redis;
-
-    return undef unless $worker_id && $redis->exists("minion:workers:$worker_id");
-
+    
     my $worker = {$redis->hgetall("minion:workers:$worker_id")};
-
-    my @jobs_keys = $redis->keys("minion:jobs:*");
-    my @jobs = map { $_->{id} } grep { $_->{worker} eq $worker_id } map { {$redis->hgetall($_)} } @jobs_keys;
-    $worker->{jobs} = \@jobs;
+    return undef unless $worker->{id};
+    
+    my @jobs = $redis->smembers("minion:list:jobs:$worker_id");
+    $worker->{jobs} = \@jobs if @jobs;
 
     return $worker;
 }
@@ -149,7 +144,7 @@ sub repair {
     # Abandoned jobs
     my @jobs_keys = $redis->keys("minion:jobs:*");
     my @jobs = map { {$redis->hgetall($_)} } @jobs_keys;
-    my @workers_keys = $redis->keys("minion:workers:*");
+    @workers_keys = $redis->keys("minion:workers:*");
     my @workers_arr = map { {$redis->hgetall($_)} } @workers_keys;
     my $workers = { map { $_->{id} => 1 } @workers_arr };
     for my $job (@jobs) {
@@ -179,8 +174,11 @@ sub reset {
     my @jobs_keys = $redis->keys("minion:jobs:*");
     $redis->del(@jobs_keys) if @jobs_keys;
 
-    $redis->del("minion:queue");
+    $redis->del('minion:queue');
     $redis->del('minion:list:workers');
+    
+    my @worker_jobs_keys = $redis->keys("minion:list:jobs:*");
+    $redis->del(@worker_jobs_keys) if @worker_jobs_keys;
 }
 
 sub retry_job {
@@ -190,6 +188,7 @@ sub retry_job {
 
     $redis->watch($key);
     my $job = {$redis->hgetall($key)};
+    return unless $job->{id};
 
     if ($job->{state} eq 'failed' || $job->{state} eq 'finished') {
         my $retried = time;
@@ -197,6 +196,7 @@ sub retry_job {
         $redis->hincrby($key, 'retries', 1);
         $redis->hmset($key, 'retried', $retried, 'state', 'inactive');
         $redis->hdel($key, 'finished', 'result', 'started', 'worker');
+        $redis->srem("minion:list:jobs:$job->{worker}", $job_id);
 
         my $priority = $retried - $job->{priority} * 3600;
         $redis->zadd('minion:queue', $priority, $key);
@@ -215,12 +215,14 @@ sub remove_job {
     my $key = "minion:jobs:$job_id";
 
     $redis->watch($key);
-    my $state = $redis->hget($key, 'state');
+    my $job = {$redis->hgetall($key)};
+    return unless $job->{id};
 
-    if ($state eq 'inactive' || $state eq 'failed' || $state eq 'finished') {
+    if ($job->{state} eq 'inactive' || $job->{state} eq 'failed' || $job->{state} eq 'finished') {
         $redis->multi;
         $redis->del($key);
         $redis->zrem("minion:queue", $key);
+        $redis->srem("minion:list:jobs:$job->{worker}", $job_id) if $job->{worker};
         $redis->exec;
         return 1;
     }
@@ -308,6 +310,7 @@ sub _try {
 
     @$job{qw(started state worker)} = (time, 'active', $worker_id);
     $redis->hmset("minion:jobs:$job->{id}", %$job);
+    $redis->sadd("minion:list:jobs:$worker_id", $job->{id});
 
     $job->{args} = decode_json($job->{args}) if $job->{args};
 
