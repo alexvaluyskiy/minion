@@ -69,6 +69,7 @@ $minion->repair;
 ok $minion->job($id), 'job has not been cleaned up';
 ok !$minion->job($id2), 'job has been cleaned up';
 ok !$minion->job($id3), 'job has been cleaned up';
+is @{$minion->backend->redis->lrange('minion:alljobs', 0, -1)}, 3, 'old jobs list cleaned';
 
 # List workers
 $worker  = $minion->worker->register;
@@ -189,6 +190,8 @@ $batch = $minion->backend->list_jobs(0, 10, {task => 'add'});
 is $batch->[0]{task},    'add', 'right task';
 is $batch->[0]{retries}, 0,     'job has not been retried';
 ok !$batch->[1], 'no more results';
+$id3 = $minion->enqueue('add');
+$minion->backend->remove_job($id3);
 $batch = $minion->backend->list_jobs(0, 1);
 is $batch->[0]{state},   'inactive', 'right state';
 is $batch->[0]{retries}, 0,          'job has not been retried';
