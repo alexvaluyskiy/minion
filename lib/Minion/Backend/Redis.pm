@@ -106,26 +106,6 @@ sub job_info {
     return $job;
 }
 
-# TODO: too slow, not critical
-sub list_jobs2 {
-    my ($self, $offset, $limit, $options) = @_;
-    my $redis = $self->redis;
-
-    my @keys = $redis->keys("minion:jobs:*");
-
-    my @jobs = sort { $b->{created} <=> $a->{created} } map { {$redis->hgetall($_)} } @keys;
-    @jobs = grep { $_->{state} eq $options->{state} } @jobs if $options->{state};
-    @jobs = grep { $_->{task} eq $options->{task} } @jobs if $options->{task};
-    @jobs = splice(@jobs, $offset, $limit);
-
-    foreach my $job (@jobs) {
-        $job->{args} = decode_json($job->{args}) if $job->{args};
-        $job->{result} = decode_json($job->{result}) if $job->{result};
-    }
-
-    return \@jobs;
-}
-
 sub list_jobs {
     my ($self, $offset, $limit, $options) = @_;
     my $redis = $self->redis;
