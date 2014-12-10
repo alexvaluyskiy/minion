@@ -10,7 +10,8 @@ use Mojo::JSON qw(decode_json encode_json);
 has 'redis';
 
 sub new {
-    shift->SUPER::new(redis => Redis::Fast->new(@_));
+    my ($self, $params) = @_;
+    $self->SUPER::new(redis => Redis::Fast->new(%$params));
 }
 
 sub register_worker {
