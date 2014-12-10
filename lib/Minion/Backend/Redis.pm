@@ -143,25 +143,24 @@ sub list_jobs {
 sub fail_job   { shift->_update(1, @_) }
 sub finish_job { shift->_update(0, @_) }
 
-# TODO: too slow, not critical
 sub repair {
     my $self = shift;
     my $redis = $self->redis;
 
+    my @workers_keys = $redis->keys("minion:workers:*");
+    my $workers = { map { $_->{id} => $_ } map { {$redis->hgetall($_)} } @workers_keys };
+    my @jobs_keys = $redis->keys("minion:jobs:*");
+    my @jobs = map { {$redis->hgetall($_)} } @jobs_keys;
+
     # Check workers on this host (all should be owned by the same user)
     my $host = hostname;
-    my @workers_keys = $redis->keys("minion:workers:*");
-    my @workers_dead = grep { $_->{host} eq $host && !kill 0, $_->{pid} } map { {$redis->hgetall($_)} } @workers_keys;
-    foreach my $worker (@workers_dead) {
-        $self->unregister_worker($worker->{id});
+    my @workers_dead = grep { $workers->{$_}->{host} eq $host && !kill 0, $workers->{$_}->{pid} } keys %$workers;
+    foreach my $worker_id (@workers_dead) {
+        $self->unregister_worker($worker_id);
+        delete $workers->{$worker_id};
     }
 
     # Abandoned jobs
-    my @jobs_keys = $redis->keys("minion:jobs:*");
-    my @jobs = map { {$redis->hgetall($_)} } @jobs_keys;
-    @workers_keys = $redis->keys("minion:workers:*");
-    my @workers_arr = map { {$redis->hgetall($_)} } @workers_keys;
-    my $workers = { map { $_->{id} => 1 } @workers_arr };
     for my $job (@jobs) {
         next if $job->{state} ne 'active' || $workers->{$job->{worker}};
         @$job{qw(result state)} = (encode_json('Worker went away'), 'failed');
@@ -169,8 +168,6 @@ sub repair {
     }
 
     # Old jobs
-    @jobs_keys = $redis->keys("minion:jobs:*");
-    @jobs = map { {$redis->hgetall($_)} } @jobs_keys;
     my $after = time - $self->minion->remove_after;
     foreach my $job (@jobs) {
         next unless $job->{state} eq 'finished';
